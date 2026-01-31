@@ -1,0 +1,28 @@
+# PlatformIO build files
+.pio/
+
+# IDE settings
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment and secrets
+.env
+.env.local
+secrets.h
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and backups
+*.log
+*.bak
+*.tmp
+
+# Compiled binaries
+*.bin
+*.elf
+*.hex
