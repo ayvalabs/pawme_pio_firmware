@@ -36,8 +36,8 @@ Connect the XIAO ESP32S3 via USB-C. The board will:
 
 **Option A: WiFi Access Point**
 ```
-SSID: PawMe-Robot-XXXX  (XXXX = last 4 digits of MAC address)
-Password: None (Development Mode) / pawme123 (Production)
+SSID: PawMe-Robot-XXXX (where XXXX is last 4 digits of MAC address)
+Password: None (Development Mode) / pawme123 (Production Mode)
 ```
 
 **Option B: Bluetooth (BLE)**
@@ -77,8 +77,8 @@ The board always creates an Access Point for initial configuration:
 
 | Setting | Value |
 |---------|-------|
-| SSID | `PawMe-Robot-XXXX` (XXXX = MAC suffix) |
-| Password | None (Dev Mode) / `pawme123` (Production) |
+| SSID | `PawMe-Camera` |
+| Password | `pawme123` |
 | IP Address | `192.168.4.1` |
 | Web Portal | `http://192.168.4.1` |
 
@@ -94,7 +94,7 @@ For companion app integration:
 
 | Setting | Value |
 |---------|-------|
-| Device Name | `PawMe-Robot-XXXX` |
+| Device Name | `PawMe-Camera` |
 | Service UUID | `4fafc201-1fb5-459e-8fcc-c5c9c331914b` |
 
 ---
@@ -381,10 +381,9 @@ pio device monitor
 Edit `src/main.cpp` to customize:
 
 ```cpp
-#define DEV_MODE true              // Set false for production (enables password)
-#define AP_SSID_PREFIX "PawMe-Robot-" // Access Point name prefix
-#define AP_PASSWORD "pawme123"       // Access Point password (production only)
-#define BLE_DEVICE_PREFIX "PawMe-Robot-" // Bluetooth name prefix
+#define AP_SSID "PawMe-Camera"      // Access Point name
+#define AP_PASSWORD "pawme123"       // Access Point password
+#define BLE_DEVICE_NAME "PawMe-Camera" // Bluetooth name
 #define HTTP_PORT 80                 // Web server port
 ```
 

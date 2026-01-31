@@ -4,7 +4,6 @@
 #include <ESPAsyncWebServer.h>
 #include <AsyncJson.h>
 #include <Preferences.h>
-#include <LittleFS.h>
 #include "esp_camera.h"
 #include <BLEDevice.h>
 #include <BLEServer.h>
@@ -156,7 +155,7 @@ const char CAPTIVE_PORTAL_HTML[] PROGMEM = R"rawliteral(
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PawMe Robot</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -165,50 +164,50 @@ const char CAPTIVE_PORTAL_HTML[] PROGMEM = R"rawliteral(
             background: #f5f5f5;
             min-height: 100vh;
         }
-        .container {
-            max-width: 400px;
-            margin: 0 auto;
-            padding: 16px;
-        }
         .header {
             display: flex;
-            align-items: center;
             justify-content: space-between;
-            padding: 12px 0;
-            margin-bottom: 16px;
+            align-items: center;
+            padding: 16px 24px;
+            background: white;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
         }
-        .header img.icon { height: 48px; width: 48px; }
-        .header img.logo { height: 32px; }
+        .app-icon { height: 40px; width: auto; }
+        .logo-text { height: 32px; width: auto; }
+        .container {
+            max-width: 480px;
+            margin: 0 auto;
+            padding: 20px;
+        }
         .camera-feed {
             width: 100%;
             border-radius: 12px;
             background: #1a1a2e;
             aspect-ratio: 4/3;
             object-fit: cover;
-            margin-bottom: 16px;
+            margin-bottom: 20px;
         }
-        .section-title {
-            font-size: 14px;
+        .wifi-list {
+            background: white;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .wifi-header {
+            padding: 16px;
             font-weight: 600;
-            color: #666;
-            margin-bottom: 8px;
+            color: #333;
+            border-bottom: 1px solid #eee;
             display: flex;
-            align-items: center;
             justify-content: space-between;
+            align-items: center;
         }
         .refresh-btn {
             background: none;
             border: none;
             font-size: 18px;
             cursor: pointer;
-            padding: 4px;
-        }
-        .wifi-list {
-            background: white;
-            border-radius: 12px;
-            overflow: hidden;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-            margin-bottom: 16px;
+            padding: 4px 8px;
         }
         .wifi-item {
             padding: 14px 16px;
@@ -221,140 +220,139 @@ const char CAPTIVE_PORTAL_HTML[] PROGMEM = R"rawliteral(
         }
         .wifi-item:hover { background: #f8f9fa; }
         .wifi-item:last-child { border-bottom: none; }
-        .wifi-item:active { background: #e8f0fe; }
-        .wifi-name {
-            font-weight: 500;
-            font-size: 15px;
+        .wifi-name { font-weight: 500; color: #333; }
+        .wifi-info {
             display: flex;
             align-items: center;
-            gap: 6px;
+            gap: 8px;
+            color: #666;
+            font-size: 13px;
         }
-        .wifi-signal {
-            font-size: 12px;
-            color: #888;
-        }
+        .lock-icon { font-size: 12px; }
         .signal-strong { color: #28a745; }
         .signal-medium { color: #ffc107; }
         .signal-weak { color: #dc3545; }
-        .loading {
-            padding: 40px;
-            text-align: center;
-            color: #888;
-        }
         
-        /* Modal Styles */
+        /* Modal styles */
         .modal-overlay {
             display: none;
             position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
+            top: 0; left: 0; right: 0; bottom: 0;
             background: rgba(0,0,0,0.5);
-            z-index: 1000;
+            z-index: 100;
             align-items: center;
             justify-content: center;
-            padding: 20px;
         }
         .modal-overlay.active { display: flex; }
         .modal {
             background: white;
             border-radius: 16px;
-            width: 100%;
-            max-width: 340px;
+            width: 90%;
+            max-width: 360px;
             padding: 24px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
         }
-        .modal-title {
-            font-size: 18px;
-            font-weight: 600;
+        .modal h3 {
             margin-bottom: 8px;
             color: #333;
         }
         .modal-ssid {
-            font-size: 14px;
             color: #666;
+            font-size: 14px;
             margin-bottom: 20px;
-            padding: 10px 14px;
-            background: #f5f5f5;
-            border-radius: 8px;
         }
-        .modal input {
+        .form-group { margin-bottom: 16px; }
+        .form-group label {
+            display: block;
+            color: #555;
+            margin-bottom: 6px;
+            font-weight: 500;
+            font-size: 14px;
+        }
+        .form-group input {
             width: 100%;
-            padding: 14px;
+            padding: 12px;
             border: 2px solid #e0e0e0;
-            border-radius: 10px;
+            border-radius: 8px;
             font-size: 16px;
-            margin-bottom: 16px;
         }
-        .modal input:focus {
+        .form-group input:focus {
             outline: none;
-            border-color: #7c7ce0;
+            border-color: #667eea;
         }
         .modal-buttons {
             display: flex;
             gap: 12px;
+            margin-top: 20px;
         }
         .btn {
             flex: 1;
             padding: 14px;
             border: none;
-            border-radius: 10px;
+            border-radius: 8px;
             font-size: 16px;
             font-weight: 600;
             cursor: pointer;
-            transition: transform 0.2s, opacity 0.2s;
         }
-        .btn:active { transform: scale(0.98); }
         .btn-cancel {
             background: #e0e0e0;
             color: #333;
         }
         .btn-connect {
-            background: #7c7ce0;
+            background: #667eea;
             color: white;
         }
         .btn:disabled {
             opacity: 0.6;
             cursor: not-allowed;
         }
+        .scanning {
+            padding: 40px;
+            text-align: center;
+            color: #666;
+        }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <img class="icon" src="/assets/app-icon.png" alt="PawMe">
-            <img class="logo" src="/assets/logo-text.png" alt="PawMe">
-        </div>
-        
-        <img class="camera-feed" id="cameraFeed" src="/mjpeg" alt="Camera Feed">
-        
-        <div class="section-title">
-            <span>Available Networks</span>
-            <button class="refresh-btn" onclick="scanWifi()" title="Refresh">&#x21bb;</button>
-        </div>
-        
-        <div class="wifi-list" id="wifiList">
-            <div class="loading">Scanning...</div>
-        </div>
+    <div class="header">
+        <img class="app-icon" src="/app-icon.png" alt="PawMe" onerror="this.style.display='none'">
+        <img class="logo-text" src="/logo-text.png" alt="PawMe Robot" onerror="this.outerHTML='<span style=font-weight:600;color:#333>PawMe Robot</span>'">
     </div>
     
-    <!-- WiFi Password Modal -->
-    <div class="modal-overlay" id="modalOverlay">
-        <div class="modal">
-            <div class="modal-title">Connect to WiFi</div>
-            <div class="modal-ssid" id="modalSsid">Network Name</div>
-            <input type="password" id="passwordInput" placeholder="Enter password" autocomplete="off">
-            <div class="modal-buttons">
-                <button class="btn btn-cancel" onclick="closeModal()">Cancel</button>
-                <button class="btn btn-connect" id="connectBtn" onclick="connectWifi()">Connect</button>
+    <div class="container">
+        <img class="camera-feed" id="cameraFeed" src="/mjpeg" alt="Camera Feed" onerror="this.src='/capture'">
+        
+        <div class="wifi-list">
+            <div class="wifi-header">
+                <span>WiFi Networks</span>
+                <button class="refresh-btn" onclick="scanWifi()" title="Refresh">&#x21bb;</button>
+            </div>
+            <div id="wifiList">
+                <div class="scanning">Scanning...</div>
             </div>
         </div>
     </div>
     
+    <!-- Password Modal -->
+    <div class="modal-overlay" id="modalOverlay">
+        <div class="modal">
+            <h3>Connect to WiFi</h3>
+            <div class="modal-ssid" id="modalSsid"></div>
+            <form id="wifiForm" onsubmit="return connectWifi(event)">
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" name="password" placeholder="Enter WiFi password" autocomplete="off">
+                </div>
+                <div class="modal-buttons">
+                    <button type="button" class="btn btn-cancel" onclick="closeModal()">Cancel</button>
+                    <button type="submit" class="btn btn-connect" id="connectBtn">Connect</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
     <script>
-        let selectedSsid = '';
-        let selectedSecure = false;
+        let selectedNetwork = null;
         
         function getSignalClass(rssi) {
             if (rssi > -50) return 'signal-strong';
@@ -362,55 +360,63 @@ const char CAPTIVE_PORTAL_HTML[] PROGMEM = R"rawliteral(
             return 'signal-weak';
         }
         
-        function getSignalIcon(rssi) {
-            if (rssi > -50) return '&#9679;&#9679;&#9679;';
-            if (rssi > -70) return '&#9679;&#9679;&#9675;';
-            return '&#9679;&#9675;&#9675;';
+        function getSignalBars(rssi) {
+            if (rssi > -50) return '\u2582\u2584\u2586\u2588';
+            if (rssi > -60) return '\u2582\u2584\u2586';
+            if (rssi > -70) return '\u2582\u2584';
+            return '\u2582';
         }
         
         async function scanWifi() {
-            document.getElementById('wifiList').innerHTML = '<div class="loading">Scanning...</div>';
+            document.getElementById('wifiList').innerHTML = '<div class="scanning">Scanning...</div>';
             try {
                 const response = await fetch('/api/wifi/scan');
                 const networks = await response.json();
                 renderWifiList(networks);
             } catch (e) {
-                document.getElementById('wifiList').innerHTML = '<div class="loading">Scan failed. Tap to retry.</div>';
+                document.getElementById('wifiList').innerHTML = '<div class="scanning" style="color:#dc3545">Scan failed. Tap to retry.</div>';
             }
         }
         
         function renderWifiList(networks) {
             const list = document.getElementById('wifiList');
             if (networks.length === 0) {
-                list.innerHTML = '<div class="loading">No networks found</div>';
+                list.innerHTML = '<div class="scanning">No networks found</div>';
                 return;
             }
             list.innerHTML = networks.map(n => `
-                <div class="wifi-item" onclick="openModal('${n.ssid.replace(/'/g, "\\'")}', ${n.secure})">
-                    <span class="wifi-name">${n.secure ? '&#128274; ' : ''}${n.ssid}</span>
-                    <span class="wifi-signal ${getSignalClass(n.rssi)}">${n.rssi}dBm</span>
+                <div class="wifi-item" onclick="selectWifi('${n.ssid.replace(/'/g, "\\'")}', ${n.secure})">
+                    <span class="wifi-name">${n.ssid}</span>
+                    <span class="wifi-info">
+                        ${n.secure ? '<span class="lock-icon">\u{1F512}</span>' : ''}
+                        <span class="${getSignalClass(n.rssi)}">${getSignalBars(n.rssi)}</span>
+                    </span>
                 </div>
             `).join('');
         }
         
-        function openModal(ssid, secure) {
-            selectedSsid = ssid;
-            selectedSecure = secure;
+        function selectWifi(ssid, secure) {
+            selectedNetwork = { ssid, secure };
             document.getElementById('modalSsid').textContent = ssid;
-            document.getElementById('passwordInput').value = '';
+            document.getElementById('password').value = '';
             document.getElementById('modalOverlay').classList.add('active');
-            if (secure) {
-                document.getElementById('passwordInput').focus();
+            if (!secure) {
+                document.getElementById('password').placeholder = 'No password required';
+            } else {
+                document.getElementById('password').placeholder = 'Enter WiFi password';
+                document.getElementById('password').focus();
             }
         }
         
         function closeModal() {
             document.getElementById('modalOverlay').classList.remove('active');
-            selectedSsid = '';
+            selectedNetwork = null;
         }
         
-        async function connectWifi() {
-            const password = document.getElementById('passwordInput').value;
+        async function connectWifi(e) {
+            e.preventDefault();
+            if (!selectedNetwork) return false;
+            
             const btn = document.getElementById('connectBtn');
             btn.disabled = true;
             btn.textContent = 'Connecting...';
@@ -419,26 +425,25 @@ const char CAPTIVE_PORTAL_HTML[] PROGMEM = R"rawliteral(
                 const response = await fetch('/api/wifi/connect', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ ssid: selectedSsid, password: password })
+                    body: JSON.stringify({
+                        ssid: selectedNetwork.ssid,
+                        password: document.getElementById('password').value
+                    })
                 });
                 const result = await response.json();
                 if (result.success) {
-                    btn.textContent = 'Connected!';
-                    setTimeout(() => {
-                        closeModal();
-                        btn.disabled = false;
-                        btn.textContent = 'Connect';
-                    }, 2000);
+                    closeModal();
+                    alert('Connecting to ' + selectedNetwork.ssid + '...');
+                    setTimeout(() => location.reload(), 3000);
                 } else {
                     alert('Failed: ' + result.message);
-                    btn.disabled = false;
-                    btn.textContent = 'Connect';
                 }
             } catch (e) {
                 alert('Connection error');
-                btn.disabled = false;
-                btn.textContent = 'Connect';
             }
+            btn.disabled = false;
+            btn.textContent = 'Connect';
+            return false;
         }
         
         // Close modal on overlay click
@@ -1011,14 +1016,6 @@ void setupWebServer() {
         request->redirect("/");
     });
     
-    // Serve static assets from LittleFS
-    server.on("/assets/app-icon.png", HTTP_GET, [](AsyncWebServerRequest *request) {
-        request->send(LittleFS, "/assets/app-icon.png", "image/png");
-    });
-    server.on("/assets/logo-text.png", HTTP_GET, [](AsyncWebServerRequest *request) {
-        request->send(LittleFS, "/assets/logo-text.png", "image/png");
-    });
-    
     // Main pages
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
         request->send(200, "text/html", CAPTIVE_PORTAL_HTML);
@@ -1202,13 +1199,6 @@ void setup() {
     logMessage("   *** DEVELOPMENT MODE ***\n");
     #endif
     logMessage("=================================\n\n");
-    
-    // Initialize LittleFS for serving assets
-    if (!LittleFS.begin(true)) {
-        logMessage("ERROR: LittleFS mount failed!\n");
-    } else {
-        logMessage("LittleFS mounted successfully\n");
-    }
     
     // Initialize WiFi early to get MAC address
     WiFi.mode(WIFI_AP_STA);

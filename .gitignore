@@ -6,15 +6,25 @@
 # IDE settings
 .vscode/
 .idea/
-*.code-workspace
+*.swp
+*.swo
+*~
 
-# Environment variables and secrets
+# Compiled files
+*.o
+*.obj
+*.elf
+*.bin
+*.hex
+*.map
+
+# Environment and secrets
 .env
 .env.local
 *.secret
 secrets.h
 
-# OS generated files
+# OS files
 .DS_Store
 .DS_Store?
 ._*
@@ -25,15 +35,31 @@ Thumbs.db
 
 # Logs
 *.log
+logs/
 
 # Backup files
 *.bak
-*.swp
-*~
+*.backup
+*.orig
 
-# Compiled files
-*.o
-*.obj
-*.elf
-*.bin
-*.hex
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Python (if using any scripts)
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+ENV/
+
+# Node (if using any tools)
+node_modules/
+npm-debug.log
+
+# Test coverage
+coverage/
+.coverage
