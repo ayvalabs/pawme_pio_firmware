@@ -802,27 +802,38 @@ void saveWiFiCredentials(const String& ssid, const String& password) {
 
 void scanWiFiNetworks() {
     logMessage("Scanning WiFi networks...\n");
+    lastWifiScan = millis();
     
-    // Use AP+STA mode to scan while maintaining AP
-    WiFi.mode(WIFI_AP_STA);
+    // Delete any previous scan results first
+    WiFi.scanDelete();
     
-    int n = WiFi.scanNetworks();
+    // Synchronous scan (true = show hidden, false = passive scan, 300ms per channel)
+    int n = WiFi.scanNetworks(false, true, false, 300);
+    
+    // Handle scan errors
+    if (n < 0) {
+        logMessage("WiFi scan error: %d\n", n);
+        wifiNetworksJson = "[]";
+        return;
+    }
+    
     logMessage("Found %d networks\n", n);
     
     JsonDocument doc;
     JsonArray networks = doc.to<JsonArray>();
     
     for (int i = 0; i < n; i++) {
+        String ssid = WiFi.SSID(i);
+        if (ssid.length() == 0) continue; // Skip hidden networks with empty SSID
+        
         JsonObject network = networks.add<JsonObject>();
-        network["ssid"] = WiFi.SSID(i);
+        network["ssid"] = ssid;
         network["rssi"] = WiFi.RSSI(i);
         network["secure"] = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
         network["channel"] = WiFi.channel(i);
     }
     
     serializeJson(doc, wifiNetworksJson);
-    lastWifiScan = millis();
-    
     WiFi.scanDelete();
 }
 
@@ -861,21 +872,31 @@ bool connectToWiFi() {
 }
 
 void startAccessPoint() {
+    // Disconnect any existing connections first
+    WiFi.disconnect(true);
+    delay(100);
+    
     WiFi.mode(WIFI_AP_STA);
+    delay(100);
     
     #if DEV_MODE
         // Development mode: No password (open network)
-        WiFi.softAP(apSSID.c_str());
-        logMessage("Access Point started (DEV MODE - NO PASSWORD): %s\n", apSSID.c_str());
+        // Channel 1, not hidden, max 4 connections
+        bool apStarted = WiFi.softAP(apSSID.c_str(), NULL, 1, 0, 4);
+        logMessage("Access Point started (DEV MODE - NO PASSWORD): %s [%s]\n", 
+                   apSSID.c_str(), apStarted ? "OK" : "FAILED");
     #else
         // Production mode: With password
-        WiFi.softAP(apSSID.c_str(), AP_PASSWORD);
-        logMessage("Access Point started: %s\n", apSSID.c_str());
+        bool apStarted = WiFi.softAP(apSSID.c_str(), AP_PASSWORD, 1, 0, 4);
+        logMessage("Access Point started: %s [%s]\n", apSSID.c_str(), apStarted ? "OK" : "FAILED");
         logMessage("Password: %s\n", AP_PASSWORD);
     #endif
     
+    delay(100);
     IPAddress apIP = WiFi.softAPIP();
     logMessage("AP IP address: %s\n", apIP.toString().c_str());
+    logMessage("AP MAC: %s\n", WiFi.softAPmacAddress().c_str());
+    logMessage("AP Stations: %d\n", WiFi.softAPgetStationNum());
     
     // Start DNS server for captive portal
     dnsServer.start(DNS_PORT, "*", apIP);
@@ -1226,8 +1247,8 @@ void setup() {
         connectToWiFi();
     }
     
-    // Initial WiFi scan
-    scanWiFiNetworks();
+    // Skip initial WiFi scan - user will manually enter WiFi details
+    // scanWiFiNetworks();
     
     // Setup BLE for companion app provisioning
     setupBLE();
@@ -1256,15 +1277,15 @@ void loop() {
     // Process DNS requests for captive portal
     dnsServer.processNextRequest();
     
-    // Periodic WiFi scan (every 30 seconds)
-    if (millis() - lastWifiScan > WIFI_SCAN_INTERVAL) {
-        scanWiFiNetworks();
-        
-        // Update BLE WiFi list characteristic
-        if (pWifiListChar) {
-            pWifiListChar->setValue(wifiNetworksJson.c_str());
-        }
-    }
+    // Periodic WiFi scan disabled - user manually enters WiFi details
+    // if (millis() - lastWifiScan > WIFI_SCAN_INTERVAL) {
+    //     scanWiFiNetworks();
+    //     
+    //     // Update BLE WiFi list characteristic
+    //     if (pWifiListChar) {
+    //         pWifiListChar->setValue(wifiNetworksJson.c_str());
+    //     }
+    // }
     
     // Handle BLE connection state changes
     if (!bleDeviceConnected && oldBleDeviceConnected) {

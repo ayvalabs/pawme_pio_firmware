@@ -57,3 +57,15 @@ Edit `src/main.cpp` to change:
 ## License
 
 MIT
+
+## erase flash
+pio run -t erase
+
+## build the firmware
+pio run
+
+## upload and monitor
+pio run -t upload
+
+## upload and monitor
+pio device monitor
