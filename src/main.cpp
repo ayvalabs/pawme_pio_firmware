@@ -2,8 +2,15 @@
 #include <WiFi.h>
 #include <DNSServer.h>
 #include <ESPAsyncWebServer.h>
+#include <AsyncJson.h>
 #include <Preferences.h>
+#include <LittleFS.h>
 #include "esp_camera.h"
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+#include <ArduinoJson.h>
 
 // =============================================================================
 // XIAO ESP32S3 Sense Camera Pin Definitions
@@ -29,10 +36,24 @@
 // =============================================================================
 // Configuration
 // =============================================================================
-#define AP_SSID "PawMe-Camera"
-#define AP_PASSWORD "pawme123"
+// Development mode - set to false for production (enables password)
+#define DEV_MODE true
+
+#define AP_SSID_PREFIX "PawMe-Robot-"
+#define AP_PASSWORD "pawme123"  // Only used when DEV_MODE is false
 #define DNS_PORT 53
 #define HTTP_PORT 80
+#define BLE_DEVICE_PREFIX "PawMe-Robot-"
+
+// Dynamic SSID and BLE name with MAC suffix
+String apSSID = "";
+String bleName = "";
+
+// BLE UUIDs
+#define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define WIFI_LIST_UUID      "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+#define WIFI_CONFIG_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26a9"
+#define STATUS_UUID         "beb5483e-36e1-4688-b7f5-ea07361b26aa"
 
 // =============================================================================
 // Global Objects
@@ -41,9 +62,91 @@ DNSServer dnsServer;
 AsyncWebServer server(HTTP_PORT);
 Preferences preferences;
 
+// BLE objects
+BLEServer *pServer = nullptr;
+BLECharacteristic *pWifiListChar = nullptr;
+BLECharacteristic *pWifiConfigChar = nullptr;
+BLECharacteristic *pStatusChar = nullptr;
+bool bleDeviceConnected = false;
+bool oldBleDeviceConnected = false;
+
 bool wifiConnected = false;
 String savedSSID = "";
 String savedPassword = "";
+
+// Get last 4 hex digits of MAC address
+String getMacSuffix() {
+    uint8_t mac[6];
+    WiFi.macAddress(mac);
+    char suffix[5];
+    snprintf(suffix, sizeof(suffix), "%02X%02X", mac[4], mac[5]);
+    return String(suffix);
+}
+
+// Forward declaration - initDeviceNames defined after logMessage
+
+// WiFi scan results
+String wifiNetworksJson = "[]";
+unsigned long lastWifiScan = 0;
+#define WIFI_SCAN_INTERVAL 30000
+
+// Console log buffer (circular buffer for web console)
+#define CONSOLE_BUFFER_SIZE 4096
+char consoleBuffer[CONSOLE_BUFFER_SIZE];
+int consoleBufferHead = 0;
+int consoleBufferTail = 0;
+
+// Forward declarations
+void logMessage(const char* format, ...);
+void scanWiFiNetworks();
+bool connectToWiFi();
+
+// =============================================================================
+// Console Logging (dual output: Serial + Web buffer)
+// =============================================================================
+void addToConsoleBuffer(const char* msg) {
+    int len = strlen(msg);
+    for (int i = 0; i < len; i++) {
+        consoleBuffer[consoleBufferHead] = msg[i];
+        consoleBufferHead = (consoleBufferHead + 1) % CONSOLE_BUFFER_SIZE;
+        if (consoleBufferHead == consoleBufferTail) {
+            consoleBufferTail = (consoleBufferTail + 1) % CONSOLE_BUFFER_SIZE;
+        }
+    }
+}
+
+void logMessage(const char* format, ...) {
+    char buffer[256];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    
+    // Output to Serial
+    Serial.print(buffer);
+    
+    // Add to web console buffer
+    addToConsoleBuffer(buffer);
+}
+
+String getConsoleBuffer() {
+    String result = "";
+    int i = consoleBufferTail;
+    while (i != consoleBufferHead) {
+        result += consoleBuffer[i];
+        i = (i + 1) % CONSOLE_BUFFER_SIZE;
+    }
+    return result;
+}
+
+void initDeviceNames() {
+    String macSuffix = getMacSuffix();
+    apSSID = String(AP_SSID_PREFIX) + macSuffix;
+    bleName = String(BLE_DEVICE_PREFIX) + macSuffix;
+    logMessage("Device MAC suffix: %s\n", macSuffix.c_str());
+    logMessage("AP SSID: %s\n", apSSID.c_str());
+    logMessage("BLE Name: %s\n", bleName.c_str());
+}
 
 // =============================================================================
 // HTML Pages
@@ -53,116 +156,299 @@ const char CAPTIVE_PORTAL_HTML[] PROGMEM = R"rawliteral(
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PawMe Camera Setup</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>PawMe Robot</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: #f5f5f5;
             min-height: 100vh;
+        }
+        .container {
+            max-width: 400px;
+            margin: 0 auto;
+            padding: 16px;
+        }
+        .header {
             display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 0;
+            margin-bottom: 16px;
+        }
+        .header img.icon { height: 48px; width: 48px; }
+        .header img.logo { height: 32px; }
+        .camera-feed {
+            width: 100%;
+            border-radius: 12px;
+            background: #1a1a2e;
+            aspect-ratio: 4/3;
+            object-fit: cover;
+            margin-bottom: 16px;
+        }
+        .section-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #666;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .refresh-btn {
+            background: none;
+            border: none;
+            font-size: 18px;
+            cursor: pointer;
+            padding: 4px;
+        }
+        .wifi-list {
+            background: white;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            margin-bottom: 16px;
+        }
+        .wifi-item {
+            padding: 14px 16px;
+            border-bottom: 1px solid #f0f0f0;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: background 0.2s;
+        }
+        .wifi-item:hover { background: #f8f9fa; }
+        .wifi-item:last-child { border-bottom: none; }
+        .wifi-item:active { background: #e8f0fe; }
+        .wifi-name {
+            font-weight: 500;
+            font-size: 15px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .wifi-signal {
+            font-size: 12px;
+            color: #888;
+        }
+        .signal-strong { color: #28a745; }
+        .signal-medium { color: #ffc107; }
+        .signal-weak { color: #dc3545; }
+        .loading {
+            padding: 40px;
+            text-align: center;
+            color: #888;
+        }
+        
+        /* Modal Styles */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
             align-items: center;
             justify-content: center;
             padding: 20px;
         }
-        .container {
+        .modal-overlay.active { display: flex; }
+        .modal {
             background: white;
-            border-radius: 20px;
-            padding: 40px;
-            max-width: 400px;
+            border-radius: 16px;
             width: 100%;
+            max-width: 340px;
+            padding: 24px;
             box-shadow: 0 20px 60px rgba(0,0,0,0.3);
         }
-        h1 {
-            color: #333;
-            text-align: center;
-            margin-bottom: 10px;
-            font-size: 28px;
-        }
-        .subtitle {
-            color: #666;
-            text-align: center;
-            margin-bottom: 30px;
-            font-size: 14px;
-        }
-        .form-group {
-            margin-bottom: 20px;
-        }
-        label {
-            display: block;
-            color: #555;
+        .modal-title {
+            font-size: 18px;
+            font-weight: 600;
             margin-bottom: 8px;
-            font-weight: 500;
+            color: #333;
         }
-        input[type="text"], input[type="password"] {
+        .modal-ssid {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 20px;
+            padding: 10px 14px;
+            background: #f5f5f5;
+            border-radius: 8px;
+        }
+        .modal input {
             width: 100%;
             padding: 14px;
             border: 2px solid #e0e0e0;
             border-radius: 10px;
             font-size: 16px;
-            transition: border-color 0.3s;
+            margin-bottom: 16px;
         }
-        input:focus {
+        .modal input:focus {
             outline: none;
-            border-color: #667eea;
+            border-color: #7c7ce0;
         }
-        button {
-            width: 100%;
-            padding: 16px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
+        .modal-buttons {
+            display: flex;
+            gap: 12px;
+        }
+        .btn {
+            flex: 1;
+            padding: 14px;
             border: none;
             border-radius: 10px;
-            font-size: 18px;
+            font-size: 16px;
             font-weight: 600;
             cursor: pointer;
-            transition: transform 0.2s, box-shadow 0.2s;
+            transition: transform 0.2s, opacity 0.2s;
         }
-        button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.4);
+        .btn:active { transform: scale(0.98); }
+        .btn-cancel {
+            background: #e0e0e0;
+            color: #333;
         }
-        .camera-link {
-            display: block;
-            text-align: center;
-            margin-top: 20px;
-            color: #667eea;
-            text-decoration: none;
-            font-weight: 500;
+        .btn-connect {
+            background: #7c7ce0;
+            color: white;
         }
-        .status {
-            text-align: center;
-            padding: 10px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-            display: none;
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
         }
-        .status.success { background: #d4edda; color: #155724; display: block; }
-        .status.error { background: #f8d7da; color: #721c24; display: block; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🐾 PawMe Camera</h1>
-        <p class="subtitle">Configure WiFi or view camera stream</p>
+        <div class="header">
+            <img class="icon" src="/assets/app-icon.png" alt="PawMe">
+            <img class="logo" src="/assets/logo-text.png" alt="PawMe">
+        </div>
         
-        <div id="status" class="status"></div>
+        <img class="camera-feed" id="cameraFeed" src="/mjpeg" alt="Camera Feed">
         
-        <form action="/save" method="POST">
-            <div class="form-group">
-                <label for="ssid">WiFi Network Name</label>
-                <input type="text" id="ssid" name="ssid" placeholder="Enter WiFi SSID" required>
-            </div>
-            <div class="form-group">
-                <label for="password">WiFi Password</label>
-                <input type="password" id="password" name="password" placeholder="Enter WiFi password">
-            </div>
-            <button type="submit">Save & Connect</button>
-        </form>
+        <div class="section-title">
+            <span>Available Networks</span>
+            <button class="refresh-btn" onclick="scanWifi()" title="Refresh">&#x21bb;</button>
+        </div>
         
-        <a href="/stream" class="camera-link">📷 View Camera Stream</a>
+        <div class="wifi-list" id="wifiList">
+            <div class="loading">Scanning...</div>
+        </div>
     </div>
+    
+    <!-- WiFi Password Modal -->
+    <div class="modal-overlay" id="modalOverlay">
+        <div class="modal">
+            <div class="modal-title">Connect to WiFi</div>
+            <div class="modal-ssid" id="modalSsid">Network Name</div>
+            <input type="password" id="passwordInput" placeholder="Enter password" autocomplete="off">
+            <div class="modal-buttons">
+                <button class="btn btn-cancel" onclick="closeModal()">Cancel</button>
+                <button class="btn btn-connect" id="connectBtn" onclick="connectWifi()">Connect</button>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let selectedSsid = '';
+        let selectedSecure = false;
+        
+        function getSignalClass(rssi) {
+            if (rssi > -50) return 'signal-strong';
+            if (rssi > -70) return 'signal-medium';
+            return 'signal-weak';
+        }
+        
+        function getSignalIcon(rssi) {
+            if (rssi > -50) return '&#9679;&#9679;&#9679;';
+            if (rssi > -70) return '&#9679;&#9679;&#9675;';
+            return '&#9679;&#9675;&#9675;';
+        }
+        
+        async function scanWifi() {
+            document.getElementById('wifiList').innerHTML = '<div class="loading">Scanning...</div>';
+            try {
+                const response = await fetch('/api/wifi/scan');
+                const networks = await response.json();
+                renderWifiList(networks);
+            } catch (e) {
+                document.getElementById('wifiList').innerHTML = '<div class="loading">Scan failed. Tap to retry.</div>';
+            }
+        }
+        
+        function renderWifiList(networks) {
+            const list = document.getElementById('wifiList');
+            if (networks.length === 0) {
+                list.innerHTML = '<div class="loading">No networks found</div>';
+                return;
+            }
+            list.innerHTML = networks.map(n => `
+                <div class="wifi-item" onclick="openModal('${n.ssid.replace(/'/g, "\\'")}', ${n.secure})">
+                    <span class="wifi-name">${n.secure ? '&#128274; ' : ''}${n.ssid}</span>
+                    <span class="wifi-signal ${getSignalClass(n.rssi)}">${n.rssi}dBm</span>
+                </div>
+            `).join('');
+        }
+        
+        function openModal(ssid, secure) {
+            selectedSsid = ssid;
+            selectedSecure = secure;
+            document.getElementById('modalSsid').textContent = ssid;
+            document.getElementById('passwordInput').value = '';
+            document.getElementById('modalOverlay').classList.add('active');
+            if (secure) {
+                document.getElementById('passwordInput').focus();
+            }
+        }
+        
+        function closeModal() {
+            document.getElementById('modalOverlay').classList.remove('active');
+            selectedSsid = '';
+        }
+        
+        async function connectWifi() {
+            const password = document.getElementById('passwordInput').value;
+            const btn = document.getElementById('connectBtn');
+            btn.disabled = true;
+            btn.textContent = 'Connecting...';
+            
+            try {
+                const response = await fetch('/api/wifi/connect', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ssid: selectedSsid, password: password })
+                });
+                const result = await response.json();
+                if (result.success) {
+                    btn.textContent = 'Connected!';
+                    setTimeout(() => {
+                        closeModal();
+                        btn.disabled = false;
+                        btn.textContent = 'Connect';
+                    }, 2000);
+                } else {
+                    alert('Failed: ' + result.message);
+                    btn.disabled = false;
+                    btn.textContent = 'Connect';
+                }
+            } catch (e) {
+                alert('Connection error');
+                btn.disabled = false;
+                btn.textContent = 'Connect';
+            }
+        }
+        
+        // Close modal on overlay click
+        document.getElementById('modalOverlay').addEventListener('click', function(e) {
+            if (e.target === this) closeModal();
+        });
+        
+        // Initial scan
+        scanWifi();
+    </script>
 </body>
 </html>
 )rawliteral";
@@ -494,7 +780,7 @@ void loadWiFiCredentials() {
     preferences.end();
     
     if (savedSSID.length() > 0) {
-        Serial.printf("Loaded saved WiFi: %s\n", savedSSID.c_str());
+        logMessage("Loaded saved WiFi: %s\n", savedSSID.c_str());
     }
 }
 
@@ -506,7 +792,33 @@ void saveWiFiCredentials(const String& ssid, const String& password) {
     
     savedSSID = ssid;
     savedPassword = password;
-    Serial.printf("Saved WiFi credentials for: %s\n", ssid.c_str());
+    logMessage("Saved WiFi credentials for: %s\n", ssid.c_str());
+}
+
+void scanWiFiNetworks() {
+    logMessage("Scanning WiFi networks...\n");
+    
+    // Use AP+STA mode to scan while maintaining AP
+    WiFi.mode(WIFI_AP_STA);
+    
+    int n = WiFi.scanNetworks();
+    logMessage("Found %d networks\n", n);
+    
+    JsonDocument doc;
+    JsonArray networks = doc.to<JsonArray>();
+    
+    for (int i = 0; i < n; i++) {
+        JsonObject network = networks.add<JsonObject>();
+        network["ssid"] = WiFi.SSID(i);
+        network["rssi"] = WiFi.RSSI(i);
+        network["secure"] = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+        network["channel"] = WiFi.channel(i);
+    }
+    
+    serializeJson(doc, wifiNetworksJson);
+    lastWifiScan = millis();
+    
+    WiFi.scanDelete();
 }
 
 bool connectToWiFi() {
@@ -514,45 +826,168 @@ bool connectToWiFi() {
         return false;
     }
     
-    Serial.printf("Attempting to connect to WiFi: %s\n", savedSSID.c_str());
-    WiFi.mode(WIFI_STA);
+    logMessage("Attempting to connect to WiFi: %s\n", savedSSID.c_str());
+    WiFi.mode(WIFI_AP_STA);
     WiFi.begin(savedSSID.c_str(), savedPassword.c_str());
     
     int attempts = 0;
     while (WiFi.status() != WL_CONNECTED && attempts < 20) {
         delay(500);
-        Serial.print(".");
+        logMessage(".");
         attempts++;
     }
     
     if (WiFi.status() == WL_CONNECTED) {
-        Serial.printf("\nConnected to WiFi! IP: %s\n", WiFi.localIP().toString().c_str());
+        logMessage("\nConnected to WiFi! IP: %s\n", WiFi.localIP().toString().c_str());
         wifiConnected = true;
+        
+        // Update BLE status characteristic if available
+        if (pStatusChar) {
+            String status = "{\"wifi\":true,\"ip\":\"" + WiFi.localIP().toString() + "\"}";
+            pStatusChar->setValue(status.c_str());
+            pStatusChar->notify();
+        }
         return true;
     }
     
-    Serial.println("\nFailed to connect to WiFi");
+    logMessage("\nFailed to connect to WiFi\n");
+    wifiConnected = false;
     return false;
 }
 
 void startAccessPoint() {
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(AP_SSID, AP_PASSWORD);
+    WiFi.mode(WIFI_AP_STA);
+    
+    #if DEV_MODE
+        // Development mode: No password (open network)
+        WiFi.softAP(apSSID.c_str());
+        logMessage("Access Point started (DEV MODE - NO PASSWORD): %s\n", apSSID.c_str());
+    #else
+        // Production mode: With password
+        WiFi.softAP(apSSID.c_str(), AP_PASSWORD);
+        logMessage("Access Point started: %s\n", apSSID.c_str());
+        logMessage("Password: %s\n", AP_PASSWORD);
+    #endif
     
     IPAddress apIP = WiFi.softAPIP();
-    Serial.printf("Access Point started: %s\n", AP_SSID);
-    Serial.printf("AP IP address: %s\n", apIP.toString().c_str());
-    Serial.printf("Password: %s\n", AP_PASSWORD);
+    logMessage("AP IP address: %s\n", apIP.toString().c_str());
     
     // Start DNS server for captive portal
     dnsServer.start(DNS_PORT, "*", apIP);
-    Serial.println("DNS server started for captive portal");
+    logMessage("DNS server started for captive portal\n");
+}
+
+// =============================================================================
+// BLE Callbacks and Setup
+// =============================================================================
+class ServerCallbacks : public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+        bleDeviceConnected = true;
+        logMessage("BLE client connected\n");
+    }
+    
+    void onDisconnect(BLEServer* pServer) {
+        bleDeviceConnected = false;
+        logMessage("BLE client disconnected\n");
+        // Restart advertising
+        pServer->startAdvertising();
+    }
+};
+
+class WiFiConfigCallbacks : public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pCharacteristic) {
+        std::string value = pCharacteristic->getValue();
+        if (value.length() > 0) {
+            logMessage("BLE WiFi config received: %s\n", value.c_str());
+            
+            // Parse JSON: {"ssid":"xxx","password":"xxx"}
+            JsonDocument doc;
+            DeserializationError error = deserializeJson(doc, value.c_str());
+            
+            if (!error) {
+                String ssid = doc["ssid"] | "";
+                String password = doc["password"] | "";
+                
+                if (ssid.length() > 0) {
+                    saveWiFiCredentials(ssid, password);
+                    
+                    // Notify status
+                    if (pStatusChar) {
+                        pStatusChar->setValue("{\"status\":\"connecting\"}");
+                        pStatusChar->notify();
+                    }
+                    
+                    // Try to connect
+                    if (connectToWiFi()) {
+                        if (pStatusChar) {
+                            String status = "{\"status\":\"connected\",\"ip\":\"" + WiFi.localIP().toString() + "\"}";
+                            pStatusChar->setValue(status.c_str());
+                            pStatusChar->notify();
+                        }
+                    } else {
+                        if (pStatusChar) {
+                            pStatusChar->setValue("{\"status\":\"failed\"}");
+                            pStatusChar->notify();
+                        }
+                    }
+                }
+            }
+        }
+    }
+};
+
+void setupBLE() {
+    logMessage("Initializing BLE...\n");
+    
+    BLEDevice::init(bleName.c_str());
+    pServer = BLEDevice::createServer();
+    pServer->setCallbacks(new ServerCallbacks());
+    
+    BLEService *pService = pServer->createService(SERVICE_UUID);
+    
+    // WiFi List Characteristic (Read)
+    pWifiListChar = pService->createCharacteristic(
+        WIFI_LIST_UUID,
+        BLECharacteristic::PROPERTY_READ
+    );
+    pWifiListChar->setValue("[]");
+    
+    // WiFi Config Characteristic (Write)
+    pWifiConfigChar = pService->createCharacteristic(
+        WIFI_CONFIG_UUID,
+        BLECharacteristic::PROPERTY_WRITE
+    );
+    pWifiConfigChar->setCallbacks(new WiFiConfigCallbacks());
+    
+    // Status Characteristic (Read + Notify)
+    pStatusChar = pService->createCharacteristic(
+        STATUS_UUID,
+        BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+    );
+    pStatusChar->addDescriptor(new BLE2902());
+    pStatusChar->setValue("{\"status\":\"ready\"}");
+    
+    pService->start();
+    
+    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+    pAdvertising->addServiceUUID(SERVICE_UUID);
+    pAdvertising->setScanResponse(true);
+    pAdvertising->setMinPreferred(0x06);
+    pAdvertising->setMinPreferred(0x12);
+    BLEDevice::startAdvertising();
+    
+    logMessage("BLE advertising started as: %s\n", bleName.c_str());
 }
 
 // =============================================================================
 // Web Server Setup
 // =============================================================================
 void setupWebServer() {
+    // CORS headers for all responses
+    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Origin", "*");
+    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "Content-Type");
+    
     // Captive portal detection endpoints
     server.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest *request) {
         request->redirect("/");
@@ -576,16 +1011,24 @@ void setupWebServer() {
         request->redirect("/");
     });
     
+    // Serve static assets from LittleFS
+    server.on("/assets/app-icon.png", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(LittleFS, "/assets/app-icon.png", "image/png");
+    });
+    server.on("/assets/logo-text.png", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(LittleFS, "/assets/logo-text.png", "image/png");
+    });
+    
     // Main pages
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-        request->send_P(200, "text/html", CAPTIVE_PORTAL_HTML);
+        request->send(200, "text/html", CAPTIVE_PORTAL_HTML);
     });
     
     server.on("/stream", HTTP_GET, [](AsyncWebServerRequest *request) {
-        request->send_P(200, "text/html", STREAM_HTML);
+        request->send(200, "text/html", STREAM_HTML);
     });
     
-    // WiFi configuration
+    // Legacy WiFi configuration (form POST)
     server.on("/save", HTTP_POST, [](AsyncWebServerRequest *request) {
         String ssid = "";
         String password = "";
@@ -599,7 +1042,7 @@ void setupWebServer() {
         
         if (ssid.length() > 0) {
             saveWiFiCredentials(ssid, password);
-            request->send_P(200, "text/html", SUCCESS_HTML);
+            request->send(200, "text/html", SUCCESS_HTML);
             
             // Try to connect in background
             delay(1000);
@@ -609,32 +1052,140 @@ void setupWebServer() {
         }
     });
     
+    // ==========================================================================
+    // REST API Endpoints for Companion App
+    // ==========================================================================
+    
+    // API: Get WiFi scan results
+    server.on("/api/wifi/scan", HTTP_GET, [](AsyncWebServerRequest *request) {
+        logMessage("API: WiFi scan requested\n");
+        scanWiFiNetworks();
+        request->send(200, "application/json", wifiNetworksJson);
+    });
+    
+    // API: Get cached WiFi list (without new scan)
+    server.on("/api/wifi/list", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(200, "application/json", wifiNetworksJson);
+    });
+    
+    // API: Connect to WiFi (JSON body)
+    AsyncCallbackJsonWebHandler *wifiConnectHandler = new AsyncCallbackJsonWebHandler("/api/wifi/connect", 
+        [](AsyncWebServerRequest *request, JsonVariant &json) {
+            JsonObject jsonObj = json.as<JsonObject>();
+            String ssid = jsonObj["ssid"] | "";
+            String password = jsonObj["password"] | "";
+            
+            logMessage("API: WiFi connect request for SSID: %s\n", ssid.c_str());
+            
+            if (ssid.length() > 0) {
+                saveWiFiCredentials(ssid, password);
+                
+                // Send response before attempting connection
+                request->send(200, "application/json", "{\"success\":true,\"message\":\"Credentials saved, connecting...\"}");
+                
+                // Connect in background (after response sent)
+                delay(500);
+                connectToWiFi();
+            } else {
+                request->send(400, "application/json", "{\"success\":false,\"message\":\"SSID is required\"}");
+            }
+        }
+    );
+    server.addHandler(wifiConnectHandler);
+    
+    // API: Get device status
+    server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+        JsonDocument doc;
+        doc["wifi_connected"] = wifiConnected;
+        doc["ap_ssid"] = apSSID;
+        #if DEV_MODE
+        doc["ap_password"] = "";
+        doc["dev_mode"] = true;
+        #else
+        doc["ap_password"] = AP_PASSWORD;
+        doc["dev_mode"] = false;
+        #endif
+        doc["saved_ssid"] = savedSSID;
+        doc["ble_connected"] = bleDeviceConnected;
+        doc["ble_name"] = bleName;
+        doc["free_heap"] = ESP.getFreeHeap();
+        doc["psram_free"] = ESP.getFreePsram();
+        
+        if (wifiConnected) {
+            doc["ip"] = WiFi.localIP().toString();
+            doc["rssi"] = WiFi.RSSI();
+        } else {
+            doc["ip"] = WiFi.softAPIP().toString();
+        }
+        
+        String response;
+        serializeJson(doc, response);
+        request->send(200, "application/json", response);
+    });
+    
+    // API: Get console log
+    server.on("/api/console", HTTP_GET, [](AsyncWebServerRequest *request) {
+        JsonDocument doc;
+        doc["log"] = getConsoleBuffer();
+        String response;
+        serializeJson(doc, response);
+        request->send(200, "application/json", response);
+    });
+    
+    // API: Reboot device
+    server.on("/api/reboot", HTTP_POST, [](AsyncWebServerRequest *request) {
+        logMessage("API: Reboot requested\n");
+        request->send(200, "application/json", "{\"success\":true,\"message\":\"Rebooting...\"}");
+        delay(500);
+        ESP.restart();
+    });
+    
+    // API: Clear saved WiFi credentials
+    server.on("/api/wifi/clear", HTTP_POST, [](AsyncWebServerRequest *request) {
+        logMessage("API: Clearing WiFi credentials\n");
+        preferences.begin("pawme", false);
+        preferences.clear();
+        preferences.end();
+        savedSSID = "";
+        savedPassword = "";
+        request->send(200, "application/json", "{\"success\":true,\"message\":\"WiFi credentials cleared\"}");
+    });
+    
     // Camera endpoints
     server.on("/mjpeg", HTTP_GET, handleMjpegStream);
     server.on("/capture", HTTP_GET, handleCapture);
     
-    // Status endpoint
+    // API: Camera stream (alias for companion app)
+    server.on("/api/stream", HTTP_GET, handleMjpegStream);
+    server.on("/api/capture", HTTP_GET, handleCapture);
+    
+    // Legacy status endpoint (for backward compatibility)
     server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request) {
-        String json = "{";
-        json += "\"wifi_connected\":" + String(wifiConnected ? "true" : "false") + ",";
-        json += "\"ap_ssid\":\"" + String(AP_SSID) + "\",";
-        json += "\"saved_ssid\":\"" + savedSSID + "\",";
+        JsonDocument doc;
+        doc["wifi_connected"] = wifiConnected;
+        doc["ap_ssid"] = apSSID;
+        doc["saved_ssid"] = savedSSID;
         if (wifiConnected) {
-            json += "\"ip\":\"" + WiFi.localIP().toString() + "\"";
+            doc["ip"] = WiFi.localIP().toString();
         } else {
-            json += "\"ip\":\"" + WiFi.softAPIP().toString() + "\"";
+            doc["ip"] = WiFi.softAPIP().toString();
         }
-        json += "}";
-        request->send(200, "application/json", json);
+        String response;
+        serializeJson(doc, response);
+        request->send(200, "application/json", response);
     });
     
-    // Handle all other requests (captive portal redirect)
+    // Handle OPTIONS for CORS preflight
     server.onNotFound([](AsyncWebServerRequest *request) {
-        request->redirect("/");
+        if (request->method() == HTTP_OPTIONS) {
+            request->send(200);
+        } else {
+            request->redirect("/");
+        }
     });
     
     server.begin();
-    Serial.println("Web server started on port 80");
+    logMessage("Web server started on port 80\n");
 }
 
 // =============================================================================
@@ -644,15 +1195,31 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
     
-    Serial.println("\n\n=================================");
-    Serial.println("   PawMe Camera Firmware v1.0");
-    Serial.println("   XIAO ESP32S3 Sense");
-    Serial.println("=================================\n");
+    logMessage("\n\n=================================\n");
+    logMessage("   PawMe-Robot Firmware v2.0\n");
+    logMessage("   XIAO ESP32S3 Sense\n");
+    #if DEV_MODE
+    logMessage("   *** DEVELOPMENT MODE ***\n");
+    #endif
+    logMessage("=================================\n\n");
+    
+    // Initialize LittleFS for serving assets
+    if (!LittleFS.begin(true)) {
+        logMessage("ERROR: LittleFS mount failed!\n");
+    } else {
+        logMessage("LittleFS mounted successfully\n");
+    }
+    
+    // Initialize WiFi early to get MAC address
+    WiFi.mode(WIFI_AP_STA);
+    
+    // Initialize device names with MAC suffix
+    initDeviceNames();
     
     // Initialize camera
     if (!initCamera()) {
-        Serial.println("ERROR: Camera initialization failed!");
-        Serial.println("Please check camera connection and restart.");
+        logMessage("ERROR: Camera initialization failed!\n");
+        logMessage("Please check camera connection and restart.\n");
         while (1) {
             delay(1000);
         }
@@ -661,33 +1228,64 @@ void setup() {
     // Load saved WiFi credentials
     loadWiFiCredentials();
     
-    // Try to connect to saved WiFi, otherwise start AP
-    if (!connectToWiFi()) {
-        startAccessPoint();
+    // Start Access Point (always on for configuration)
+    startAccessPoint();
+    
+    // Try to connect to saved WiFi if available
+    if (savedSSID.length() > 0) {
+        connectToWiFi();
     }
+    
+    // Initial WiFi scan
+    scanWiFiNetworks();
+    
+    // Setup BLE for companion app provisioning
+    setupBLE();
     
     // Setup web server
     setupWebServer();
     
-    Serial.println("\n=================================");
-    Serial.println("   Setup Complete!");
-    Serial.println("=================================");
+    logMessage("\n=================================\n");
+    logMessage("   Setup Complete!\n");
+    logMessage("=================================\n");
+    #if DEV_MODE
+    logMessage("Access Point: %s (NO PASSWORD)\n", apSSID.c_str());
+    #else
+    logMessage("Access Point: %s (pwd: %s)\n", apSSID.c_str(), AP_PASSWORD);
+    #endif
+    logMessage("AP IP: http://%s\n", WiFi.softAPIP().toString().c_str());
     if (wifiConnected) {
-        Serial.printf("Connected to: %s\n", savedSSID.c_str());
-        Serial.printf("IP Address: %s\n", WiFi.localIP().toString().c_str());
-    } else {
-        Serial.printf("Connect to WiFi: %s\n", AP_SSID);
-        Serial.printf("Password: %s\n", AP_PASSWORD);
-        Serial.printf("Then open: http://%s\n", WiFi.softAPIP().toString().c_str());
+        logMessage("WiFi Connected: %s\n", savedSSID.c_str());
+        logMessage("WiFi IP: http://%s\n", WiFi.localIP().toString().c_str());
     }
-    Serial.println("=================================\n");
+    logMessage("BLE Name: %s\n", bleName.c_str());
+    logMessage("=================================\n\n");
 }
 
 void loop() {
     // Process DNS requests for captive portal
-    if (!wifiConnected) {
-        dnsServer.processNextRequest();
+    dnsServer.processNextRequest();
+    
+    // Periodic WiFi scan (every 30 seconds)
+    if (millis() - lastWifiScan > WIFI_SCAN_INTERVAL) {
+        scanWiFiNetworks();
+        
+        // Update BLE WiFi list characteristic
+        if (pWifiListChar) {
+            pWifiListChar->setValue(wifiNetworksJson.c_str());
+        }
     }
     
-    delay(1);
+    // Handle BLE connection state changes
+    if (!bleDeviceConnected && oldBleDeviceConnected) {
+        delay(500);
+        pServer->startAdvertising();
+        logMessage("BLE: Restarted advertising\n");
+        oldBleDeviceConnected = bleDeviceConnected;
+    }
+    if (bleDeviceConnected && !oldBleDeviceConnected) {
+        oldBleDeviceConnected = bleDeviceConnected;
+    }
+    
+    delay(10);
 }
