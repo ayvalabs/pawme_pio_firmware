@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <WiFi.h>
 #include <WebServer.h>
 #include <Preferences.h>
 #include <ArduinoOTA.h>
@@ -16,14 +17,20 @@ Preferences prefs;
    ========================= */
 
 void handleRoot() {
-  server.send(200, "text/html",
-    "<h2>Pawme WiFi Setup</h2>"
-    "<form method='POST' action='/wifi'>"
-    "SSID:<br><input name='ssid'><br>"
-    "Password:<br><input name='pass' type='password'><br><br>"
-    "<button>Save</button>"
-    "</form>"
-  );
+  String html = "<h2>Pawme WiFi Setup</h2>";
+  if (WiFi.status() == WL_CONNECTED) {
+    html += "<div style='margin-bottom: 20px;'>";
+    html += "<h3>Live Feed</h3>";
+    // Using the mDNS name in the browser view as well
+    html += "<img src='http://pawme.local:81/stream' style='width:320px;'>";
+    html += "</div>";
+  }
+  html += "<form method='POST' action='/wifi'>";
+  html += "SSID:<br><input name='ssid'><br>";
+  html += "Password:<br><input name='pass' type='password'><br><br>";
+  html += "<button>Save</button></form>";
+  
+  server.send(200, "text/html", html);
 }
 
 void handleWifiSave() {
@@ -38,7 +45,10 @@ void handleWifiSave() {
   prefs.end();
 
   server.send(200, "text/plain", "Saved. Rebooting...");
-  delay(1000);
+  
+  // Clean shutdown for network stability
+  server.client().stop(); 
+  delay(2000); 
   ESP.restart();
 }
 
@@ -82,17 +92,34 @@ void loop() {
     ArduinoOTA.handle();
   }
 
-  /* ===== mDNS ===== */
+  /* ===== mDNS SERVICE DISCOVERY ===== */
   if (deviceState == WIFI_CONNECTED && !mdnsStarted) {
-    MDNS.begin("pawme");   // pawme.local
-    mdnsStarted = true;
+    // Start mDNS responder for pawme.local
+    if (MDNS.begin("pawme")) {
+      Serial.println("[mDNS] Started: http://pawme.local");
+      
+      // Advertise the main web server (Port 80)
+      MDNS.addService("http", "tcp", 80);
+      
+      // Advertise the camera stream specifically (Port 81)
+      // The app will look for "_pawme-cam._tcp"
+      MDNS.addService("pawme-cam", "tcp", 81);
+      
+      mdnsStarted = true;
+    }
   }
 
   /* ===== CAMERA (START ONCE, STA ONLY) ===== */
   if (deviceState == WIFI_CONNECTED && !cameraStarted) {
-    cameraRegisterStream();  // starts HTTP server on port 81
+    cameraRegisterStream();  // Starts the secondary server on port 81
     cameraStarted = true;
   }
 
   server.handleClient();
+  
+  // Allow mDNS to process background tasks
+  if(mdnsStarted) {
+    // Optional: some ESP32 cores require explicit MDNS update calls
+    // MDNS.update(); 
+  }
 }
