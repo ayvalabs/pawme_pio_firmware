@@ -1,43 +1,39 @@
 #include "src/hardware/cameraManager.h"
-
 #include <Arduino.h>
 #include "esp_camera.h"
 #include "esp_http_server.h"
 
 /* =====================
-   CAMERA PIN CONFIG
-   ESP32-CAM-MJPEG2SD / OV3660
+   CAMERA PIN CONFIG (XIAO_ESP32S3)
+   From your camerapin.h
    ===================== */
-
-#define PWDN_GPIO_NUM     32
+#define PWDN_GPIO_NUM     -1
 #define RESET_GPIO_NUM    -1
-#define XCLK_GPIO_NUM      0
-#define SIOD_GPIO_NUM     26
-#define SIOC_GPIO_NUM     27
+#define XCLK_GPIO_NUM     10
+#define SIOD_GPIO_NUM     40
+#define SIOC_GPIO_NUM     39
 
-#define Y9_GPIO_NUM       35
-#define Y8_GPIO_NUM       34
-#define Y7_GPIO_NUM       39
-#define Y6_GPIO_NUM       36
-#define Y5_GPIO_NUM       21
-#define Y4_GPIO_NUM       19
-#define Y3_GPIO_NUM       18
-#define Y2_GPIO_NUM        5
-#define VSYNC_GPIO_NUM    25
-#define HREF_GPIO_NUM     23
-#define PCLK_GPIO_NUM     22
+#define Y9_GPIO_NUM       48
+#define Y8_GPIO_NUM       11
+#define Y7_GPIO_NUM       12
+#define Y6_GPIO_NUM       14
+#define Y5_GPIO_NUM       16
+#define Y4_GPIO_NUM       18
+#define Y3_GPIO_NUM       17
+#define Y2_GPIO_NUM       15
+#define VSYNC_GPIO_NUM    38
+#define HREF_GPIO_NUM     47
+#define PCLK_GPIO_NUM     13
 
 /* =====================
    INTERNAL STATE
    ===================== */
-
 static httpd_handle_t stream_httpd = NULL;
 static bool cameraInitialized = false;
 
 /* =====================
    CAMERA INIT
    ===================== */
-
 static bool initCamera() {
   if (cameraInitialized) return true;
 
@@ -63,12 +59,13 @@ static bool initCamera() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
 
-  config.xclk_freq_hz = 20000000;
+  config.xclk_freq_hz = 10000000;
   config.pixel_format = PIXFORMAT_JPEG;
+  config.grab_mode = CAMERA_GRAB_LATEST; // Ensure we get fresh frames
 
   if (psramFound()) {
-    config.frame_size = FRAMESIZE_SVGA;   // OV3660
-    config.jpeg_quality = 10;
+    config.frame_size = FRAMESIZE_VGA; 
+    config.jpeg_quality = 12;
     config.fb_count = 2;
     config.fb_location = CAMERA_FB_IN_PSRAM;
   } else {
@@ -78,7 +75,9 @@ static bool initCamera() {
     config.fb_location = CAMERA_FB_IN_DRAM;
   }
 
-  if (esp_camera_init(&config) != ESP_OK) {
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("[CAM] Init failed with error 0x%x\n", err);
     return false;
   }
 
@@ -89,46 +88,47 @@ static bool initCamera() {
 /* =====================
    MJPEG STREAM HANDLER
    ===================== */
-
 static esp_err_t stream_handler(httpd_req_t *req) {
-  if (!initCamera()) {
-    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Camera init failed");
-    return ESP_FAIL;
-  }
+  camera_fb_t *fb = NULL;
+  esp_err_t res = ESP_OK;
+  char *part_buf[64];
 
-  httpd_resp_set_type(req, "multipart/x-mixed-replace; boundary=frame");
+  res = httpd_resp_set_type(req, "multipart/x-mixed-replace;boundary=frame");
+  if (res != ESP_OK) return res;
 
   while (true) {
-    camera_fb_t *fb = esp_camera_fb_get();
-    if (!fb) continue;
-
-    char header[64];
-    snprintf(header, sizeof(header),
-             "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n",
-             fb->len);
-
-    httpd_resp_send_chunk(req, header, strlen(header));
-    httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
-    httpd_resp_send_chunk(req, "\r\n", 2);
-
-    esp_camera_fb_return(fb);
-    vTaskDelay(pdMS_TO_TICKS(30));
+    fb = esp_camera_fb_get();
+    if (!fb) {
+      Serial.println("[CAM] Frame capture failed");
+      res = ESP_FAIL;
+    } else {
+      size_t hlen = snprintf((char *)part_buf, 64, "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", fb->len);
+      res = httpd_resp_send_chunk(req, (const char *)part_buf, hlen);
+      if (res == ESP_OK) {
+        res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
+      }
+      if (res == ESP_OK) {
+        res = httpd_resp_send_chunk(req, "\r\n", 2);
+      }
+      esp_camera_fb_return(fb);
+    }
+    if (res != ESP_OK) break;
+    // Small delay to prevent task starvation
+    vTaskDelay(pdMS_TO_TICKS(1));
   }
-
-  return ESP_OK;
+  return res;
 }
 
 /* =====================
    PUBLIC API
    ===================== */
-
 void cameraRegisterStream() {
-  if (stream_httpd) {
-    Serial.println("[CAM] Stream server already running");
+  if (stream_httpd) return;
+
+  if (!initCamera()) {
+    Serial.println("[CAM] Camera Init Failed, stopping server start.");
     return;
   }
-
-  Serial.println("[CAM] Starting stream server on port 81");
 
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = 81;
@@ -142,10 +142,7 @@ void cameraRegisterStream() {
   };
 
   if (httpd_start(&stream_httpd, &config) == ESP_OK) {
-    Serial.println("[CAM] Stream server started");
+    Serial.println("[CAM] Stream server started on port 81");
     httpd_register_uri_handler(stream_httpd, &stream_uri);
-  } else {
-    Serial.println("[CAM] FAILED to start stream server");
   }
 }
-
