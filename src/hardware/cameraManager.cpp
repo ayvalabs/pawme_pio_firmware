@@ -30,6 +30,7 @@
    ===================== */
 static httpd_handle_t stream_httpd = NULL;
 static bool cameraInitialized = false;
+static volatile bool streamBusy = false;
 
 /* =====================
    CAMERA INIT
@@ -89,33 +90,54 @@ static bool initCamera() {
    MJPEG STREAM HANDLER
    ===================== */
 static esp_err_t stream_handler(httpd_req_t *req) {
+
+  if (streamBusy) {
+    Serial.println("[CAM] Stream rejected - already in use");
+    httpd_resp_send_500(req);
+    return ESP_FAIL;
+  }
+
+  streamBusy = true;
+
   camera_fb_t *fb = NULL;
   esp_err_t res = ESP_OK;
-  char *part_buf[64];
+  char part_buf[64];
 
   res = httpd_resp_set_type(req, "multipart/x-mixed-replace;boundary=frame");
-  if (res != ESP_OK) return res;
+  if (res != ESP_OK) {
+    streamBusy = false;
+    return res;
+  }
 
   while (true) {
+
     fb = esp_camera_fb_get();
     if (!fb) {
       Serial.println("[CAM] Frame capture failed");
       res = ESP_FAIL;
-    } else {
-      size_t hlen = snprintf((char *)part_buf, 64, "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", fb->len);
-      res = httpd_resp_send_chunk(req, (const char *)part_buf, hlen);
-      if (res == ESP_OK) {
-        res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
-      }
-      if (res == ESP_OK) {
-        res = httpd_resp_send_chunk(req, "\r\n", 2);
-      }
-      esp_camera_fb_return(fb);
+      break;
     }
+
+    size_t hlen = snprintf(part_buf, sizeof(part_buf),
+      "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n",
+      fb->len);
+
+    res = httpd_resp_send_chunk(req, part_buf, hlen);
+
+    if (res == ESP_OK)
+      res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
+
+    if (res == ESP_OK)
+      res = httpd_resp_send_chunk(req, "\r\n", 2);
+
+    esp_camera_fb_return(fb);
+
     if (res != ESP_OK) break;
-    // Small delay to prevent task starvation
+
     vTaskDelay(pdMS_TO_TICKS(1));
   }
+
+  streamBusy = false;
   return res;
 }
 
